@@ -20,6 +20,7 @@ class CNNModel:
         self.input_shape = input_shape
         self.num_classes = num_classes
         self.model_type = model_type
+        self.base_model = None  # referencia al modelo preentrenado (solo TL/FT)
         self.model = self._build_model()
         self.history = None
 
@@ -54,6 +55,7 @@ class CNNModel:
             raise ValueError(f"Modelo no soportado: {self.model_type}")
         base = apps[self.model_type](weights="imagenet", include_top=False, input_shape=self.input_shape)
         base.trainable = False
+        self.base_model = base  # guardar referencia para fine tuning
         x = tf.keras.layers.GlobalAveragePooling2D()(base.output)
         x = tf.keras.layers.Dropout(0.35)(x)
         output = tf.keras.layers.Dense(self.num_classes, activation="softmax")(x)
@@ -119,6 +121,44 @@ class CNNModel:
         plt.tight_layout()
         plt.savefig(save_path, dpi=180, bbox_inches="tight")
         plt.show()
+
+    def fine_tune(self, unfreeze_layers=30, learning_rate=1e-5):
+        """Descongela las ultimas N capas del modelo base para fine tuning.
+
+        Debe llamarse despues de un entrenamiento inicial con transfer learning
+        (base congelada). Recompila el modelo con una tasa de aprendizaje muy
+        baja para ajustar los pesos del modelo preentrenado al problema actual.
+        """
+        if self.model_type == "custom_cnn":
+            raise ValueError("Fine tuning solo aplica a modelos preentrenados (mobilenet, resnet50, efficientnet).")
+
+        # Recuperar el modelo base: primero intentar la referencia guardada,
+        # si no, buscarlo como sublayer de tipo Model dentro del modelo funcional.
+        if self.base_model is not None:
+            base_model = self.base_model
+        else:
+            base_model = next(
+                (l for l in self.model.layers if isinstance(l, self.tf.keras.Model)),
+                None,
+            )
+            if base_model is None:
+                raise ValueError("No se encontro el modelo base dentro del modelo funcional.")
+            self.base_model = base_model
+
+        base_model.trainable = True
+
+        # Congelar todo menos las ultimas N capas
+        for layer in base_model.layers[:-unfreeze_layers]:
+            layer.trainable = False
+
+        n_trainable = sum(1 for l in base_model.layers if l.trainable)
+        print(f"Fine tuning: {n_trainable} capas entrenable en el modelo base (lr={learning_rate})")
+
+        self.model.compile(
+            optimizer=self.tf.keras.optimizers.Adam(learning_rate=learning_rate),
+            loss="categorical_crossentropy",
+            metrics=["accuracy"],
+        )
 
     def predict_image(self, image_path):
         import numpy as np
